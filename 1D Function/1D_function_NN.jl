@@ -33,7 +33,7 @@ function train(true_func)
     target_loss = .05
     losses = ones(max_iterations).*target_loss
     current_loss = 1
-    # Define loss function using root mean Squared
+    # Define loss function using mean Squared
     function loss(model, ps, st, x, y)
             true_y, new_state = model(x, ps, st)
             l = sum((true_y.-y).^2)/num_samples
