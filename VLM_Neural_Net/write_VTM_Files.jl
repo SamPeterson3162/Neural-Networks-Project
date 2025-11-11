@@ -1,21 +1,21 @@
-using VortexLattice # load package we will be using
-using DelimitedFiles
+# Load necessary Packages
+using Lux
+using Plots
+using Optimisers
+using Zygote
 using Random
+using Statistics
+using MLUtils
+using VortexLattice
 
-# This file writes our vlm_data file that will be used to train the neural network
+#= This file trains a neural network with the angle of attack and chord values to predict  CL and CD values given by lift_to_drag_alpha.jl and then
+lets us compute the value using the neural net for any distribution of chord lengths and gives the true value=#
 
-function get_area(x1, x2, x3, x4)
-    area = 1/2 + x1 + x2 + x3 + x4/2
-    return area*2.5
-end
-
-function analyze_system(a,x1, x2, x3, x4)
-    #Set up the geometric properties of half the wing'
-    total_area = 20
+function analyze_system(i, a, root,x1, x2, x3, x4)
+    # This is the same function used to create the file, but here it is just used to test the final value input by the user
     yle = [0.0, 2.5, 5, 7.5, 10] # leading edge y-position
     zle = [0.0, 0.0, 0.0, 0.0, 0.0] # leading edge z-position
-    c_norm = total_area / get_area(x1, x2, x3, x4)
-    chord = [1, x1, x2, x3, x4]*c_norm # chord length
+    chord = [root, x1, x2, x3, x4] # chord length
     xle = ones(5)* chord[1] - chord # leading edge x-position
     theta = [0.0*pi/180, 0.0*pi/180, 0.0*pi/180, 0.0*pi/180, 0.0*pi/180] # twist (in radians)
     phi = [0.0, 0.0, 0.0, 0.0, 0.0] # section rotation about the x-axis
@@ -48,42 +48,36 @@ function analyze_system(a,x1, x2, x3, x4)
     fs = Freestream(Vinf, alpha, beta, Omega)
     # we already mirrored, so we do not need a symmetric calculation
     symmetric = false
-
     steady_analysis!(system, ref, fs; symmetric)
-    # Extract all body forces
-    CF, CM = body_forces(system; frame=Wind())
-    # extract aerodynamic forces
-    CD, CY, CL = CF
-    Cl, Cm, Cn = CM
-    CDiff = far_field_drag(system)
-    return CL, CDiff, c_norm
+    write_vtk("vlm_neural_net/VTM_Files/EG$i/Wing_EG_$i", system)
+end
+
+function get_data(file) # Reads, processes, and splits our data from the vlm file into sets for training and testing
+    println("Reading File") # Read data from our vlm file
+    lines = readlines(file)
+    num_lines = 4
+    vlm_data = zeros(8, num_lines)
+    for i in 1:num_lines #Split the data up into 8 columns within a matrix
+        line = split(lines[i])
+        for j in 1:8
+            vlm_data[j,i] = parse(Float32,line[j])
+        end
+    end
+    # vlm_data is ordered with CL, CD, Alpha, Root, x1, x2, x3, x4
+    Wing_1 = vlm_data[3:8,1]
+    Wing_2 = vlm_data[3:8,2]
+    Wing_3 = vlm_data[3:8,3]
+    Wing_4 = vlm_data[3:8,4]
+    Wings = [Wing_1, Wing_2, Wing_3, Wing_4]
+    return Wings
 end
 
 function main()
-    n = 500
-    # Define function to get chords
-    input_lst = zeros(8,n)
-    for i in 1:n
-        x_root = 1
-        x1 = x_root * rand(40:100)/100
-        x2 = x1 * rand(20:100)/100
-        x3 = x2 * rand(10:100)/100
-        x4 = x3 * rand(5:100)/100
-        input_lst[4:8,i] .= x_root, x1, x2, x3, x4
-        input_lst[3,i] = rand(1:100)/10
+    Wings = get_data("vlm_neural_net/vlm_alpha_data_file.data")
+    for i in 1:4
+        system = analyze_system(i, Wings[i][1], Wings[i][2], Wings[i][3], Wings[i][4], Wings[i][5], Wings[i][6])
     end
-    for i in 1:n
-        a = input_lst[3,i]
-        x1, x2, x3, x4 = input_lst[5:8,i]
-        CL, CDiff, root = analyze_system(a, x1, x2, x3, x4)
-        input_lst[4:8,i] .= input_lst[4:8,i] .* root
-        input_lst[1:2,i] .= CL, CDiff
-        input_lst[4,i] = root
-    end
-    # Write to file
-    output_file = "vlm_neural_net/vlm_alpha_data_file.data"
-    delimiter = ' ' 
-    writedlm(output_file, transpose(input_lst), delimiter)
-
-    println("File '$output_file' written successfully.")
+    println("VTM Files written successfully")
 end
+
+

@@ -23,7 +23,7 @@ function analyze_system(a,root,x1, x2, x3, x4)
     # define the number of panels in the spanswise and chordwise directions
     ns = 12 # number of spanwise panels
     nc = 6  # number of chordwise panels
-    spacing_s = Sine() # spanwise discretization scheme
+    spacing_s = Uniform() # spanwise discretization scheme
     spacing_c = Uniform() # chordwise discretization scheme
     # generate a lifting surface for the defined geometry
     grid, ratio = wing_to_grid(xle, yle, zle, chord, theta, phi, ns, nc;
@@ -126,7 +126,7 @@ function train()
     )
     rng = Random.default_rng()
     ps, st = Lux.setup(rng, model)
-    epochs = 5000 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< DEFINE EPOCHS HERE
+    epochs = 10000 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< DEFINE EPOCHS HERE
     # __________________________________________________________________________________________________________
     train_losses = ones(epochs) # Create local lists for training and testing losses
     test_losses = ones(epochs)
@@ -163,7 +163,7 @@ function train()
     end
     #endregion
     #region Optimization
-    optimizer = Optimisers.ADAMW(0.0011f0, (0.9f0, 0.999f0), 0.1f0) # Using ADAMW as decay helps increase generalization and reduce test loss
+    optimizer = Optimisers.ADAMW(0.0005f0, (0.9f0, 0.999f0), 0.1f0) # Using ADAMW as decay helps increase generalization and reduce test loss
     opt_state = Optimisers.setup(optimizer, ps) # Set states
     # Run iterations with epochs
     println("Training in progress...")
