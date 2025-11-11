@@ -23,7 +23,7 @@ function analyze_system(x1, x2, x3, x4)
     # define the number of panels in the spanswise and chordwise directions
     ns = 12 # number of spanwise panels
     nc = 6  # number of chordwise panels
-    spacing_s = Sine() # spanwise discretization scheme
+    spacing_s = Uniform() # spanwise discretization scheme
     spacing_c = Uniform() # chordwise discretization scheme
     # generate a lifting surface for the defined geometry
     grid, ratio = wing_to_grid(xle, yle, zle, chord, theta, phi, ns, nc;
@@ -64,9 +64,9 @@ function main()
     # Define function to get chords
     input_lst = zeros(6,n)
     input_lst[2:6,1] .= 1, .9375,.75, .4375, .01
-    for i in 2:n
+    for i in 2:n # Uses random to get random chord values that are a percentage of the adjacent chord
         x_root = 1
-        x1 = x_root * rand(40:100)/100
+        x1 = x_root * rand(40:100)/100 
         x2 = x1 * rand(20:100)/100
         x3 = x2 * rand(10:100)/100
         x4 = x3 * rand(5:100)/100

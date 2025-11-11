@@ -23,7 +23,7 @@ function analyze_system(x1, x2, x3, x4)
     # define the number of panels in the spanswise and chordwise directions
     ns = 12 # number of spanwise panels
     nc = 6  # number of chordwise panels
-    spacing_s = Sine() # spanwise discretization scheme
+    spacing_s = Uniform() # spanwise discretization scheme
     spacing_c = Uniform() # chordwise discretization scheme
     # generate a lifting surface for the defined geometry
     grid, ratio = wing_to_grid(xle, yle, zle, chord, theta, phi, ns, nc;
@@ -144,7 +144,7 @@ function train()
 
         return l, new_state
     end
-    optimizer = Optimisers.ADAM(0.00005f0)
+    optimizer = Optimisers.ADAM(0.00005f0) # Didn't use the ADAMW optimizer here as it did fine without it
     opt_state = Optimisers.setup(optimizer, ps)
     # Run iterations with epochs
     println("Training in progress...")
