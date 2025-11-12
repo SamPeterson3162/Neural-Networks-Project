@@ -76,10 +76,10 @@ function get_data(file) # Reads, processes, and splits our data from the vlm fil
     ratio = 0.8 # We want 80 percent of our data set used for training, the rest for testing
     train_size = round(Int, num_lines * ratio)
     test_size = num_lines - train_size
-    training_vars = zeros(6,train_size) # Create zero lists for training and testing data sets
-    training_vlm = zeros(2,train_size)
-    test_vars = zeros(6,test_size)
-    test_vlm = zeros(2,test_size)
+    training_vars = zeros(Float32,6,train_size) # Create zero lists for training and testing data sets
+    training_vlm = zeros(Float32,2,train_size)
+    test_vars = zeros(Float32,6,test_size)
+    test_vlm = zeros(Float32,2,test_size)
     # Normalize Data
     println("Normalizing the data")
     vlm_norm = zeros(8, 2) # 1-8 for each variable within the data, 1-2 for mean and standard deviation respectively
@@ -149,8 +149,8 @@ function train()
     function abs_loss(model, ps, st, x, y)
         true_y, new_state = model(x, ps, st)
         # Denormalize our values for CL and CD to provide true errors
-        true_y2 = zeros(size(true_y))
-        y2 = zeros(size(y))
+        true_y2 = zeros(eltype(y),size(true_y))
+        y2 = zeros(eltype(y),size(y))
         print(size(y))
         print(size(true_y))
         true_y2[1, :] .= true_y[1,:].*vlm_norm[1,2] .+vlm_norm[1,1] # predicted CL Values being denormalized
@@ -208,6 +208,26 @@ function train()
     plot!(1:epochs,cl_losses,label="Lift Loss")
     plot!(1:epochs,cd_losses,label="Drag Loss")
     savefig(loss_plt, "vlm_neural_net/vlm_Loss_Function.png")
+    #endregion
+    #region Plotting CL and CD vs Predicted
+    samples = size(test_vars, 2)
+    CL_lst = zeros(samples)
+    Pred_CL_lst = zeros(samples)
+    CD_lst = zeros(samples)
+    Pred_CD_lst = zeros(samples)
+    for i in 1:samples
+        CL_lst[i] = test_vlm[1,i]*vlm_norm[1,2] + vlm_norm[1,1]
+        CD_lst[i] = test_vlm[2,i]*vlm_norm[2,2] + vlm_norm[2,1]
+        outputs, _ = Lux.apply(model, test_vars[:, i], ps, st)
+        Pred_CL_lst[i] = outputs[1]*vlm_norm[1,2] + vlm_norm[1,1]
+        Pred_CD_lst[i] = outputs[2]*vlm_norm[2,2] + vlm_norm[2,1]
+    end
+    CL_plt = plot(CL_lst, Pred_CL_lst,label ="", title="Coefficient of Lift",xlabel="Actual", ylabel="Predicted", seriestype=:scatter)
+    plot!(CL_plt,CL_lst,CL_lst,label ="")
+    savefig(CL_plt, "vlm_neural_net/lift_coefficient.png")
+    CD_plt = plot(CD_lst, Pred_CD_lst,label ="", title="Coefficient of Drag",xlabel="Actual", ylabel="Predicted", seriestype=:scatter)
+    plot!(CD_plt,CD_lst,CD_lst, label = "")
+    savefig(CD_plt, "vlm_neural_net/drag_coefficient.png")
     #endregion
     return model, ps, st, vlm_norm, final_cl_error, final_cd_error
 end
