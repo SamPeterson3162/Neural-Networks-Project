@@ -8,13 +8,12 @@ using Statistics
 using MLUtils
 using VortexLattice
 using LinearAlgebra
+using JLD2
 
 #= This file trains a neural network with the angle of attack and chord values to predict  CL and CD values given by lift_to_drag_alpha.jl and then
 lets us compute the value using the neural net for any distribution of chord lengths and gives the true value=#
 
-function get_data(file) # Reads, processes, and splits our data from the vlm file into sets for training and testing
-    num_outputs = 48 # This is four times the spanwise spacing used to set up the VLM analysis
-    num_inputs = 11 # This is our 11 inputs, alpha, root, x1, x2, x3, x4, t0, t1, t2, t3, t4
+function get_data(num_inputs, num_outputs,file) # Reads, processes, and splits our data from the vlm file into sets for training and testing
     num_vars = num_outputs + num_inputs
     println("Reading File") # Read data from our vlm file
     lines = readlines(file)
@@ -26,7 +25,7 @@ function get_data(file) # Reads, processes, and splits our data from the vlm fil
             vlm_data[j,i] = parse(Float32,line[j])
         end
     end
-    # vlm_data is ordered with cl coefficients, cd coefficients, Alpha, Root, x1, x2, x3, x4
+    # vlm_data is ordered with cl coefficients, cd coefficients, Alpha, Chord values, and twist values
     # Define test and trainining sets
     println("Defining vectors of data")
     ratio = 0.8 # We want 80 percent of our data set used for training, the rest for testing
@@ -67,15 +66,15 @@ function get_data(file) # Reads, processes, and splits our data from the vlm fil
     return training_vars, training_vlm, test_vars, test_vlm, vlm_norm
 end
 
-function train()
+function train(inputs, outputs)
     # Extract data from vlm_alpha_data_file
-    training_vars, training_vlm, test_vars, test_vlm, vlm_norm = get_data("vlm_neural_net/vlm_data_file.data")
-    outputs = 48 # <<<<<<<<<<<<<<<<<<< MUST EDIT IF N_OUTPUTS CHANGES
+    training_vars, training_vlm, test_vars, test_vlm, vlm_norm = get_data(inputs, outputs,"vlm_neural_net/vlm_data_file.data")
     ml = 85
+    model_vars = (inputs, outputs, ml)
     #region Model Definition
     println("Defining Model")
     model = Lux.Chain(
-        Lux.Dense(11 => ml,relu),
+        Lux.Dense(inputs => ml,relu),
         Lux.Dense(ml => ml,relu),
         Lux.Dense(ml => ml,relu),
         Lux.Dense(ml => ml,relu),
@@ -103,7 +102,7 @@ function train()
                     cfs = @view true_y[c,:] 
                     y_c = @view y[c,:]
                     # Calculate MSE for this row
-                    l_cfs = sum(abs2, cfs .- y_c) / size(y, 2)
+                    l_cfs = sum(abs2, (cfs .- y_c)) / size(y, 2)
                     l_cfs # Return the loss for this row
                     end for c in 1:lst_length]
         l_cl = loss_lst[1:Int64(outputs/2)]
@@ -136,11 +135,11 @@ function train()
     #region Optimization
     start_lr = 0.002f0
     min_lr = 0.00001f0
-    optimizer = Optimisers.ADAMW(Float32(start_lr), (0.9f0, 0.999f0), 0.7f0) # Using ADAMW as decay helps increase generalization and reduce test loss
+    optimizer = Optimisers.ADAMW(Float32(start_lr), (0.9f0, 0.999f0), 0.05f0) # Using ADAMW as decay helps increase generalization and reduce test loss
     opt_state = Optimisers.setup(optimizer, ps) # Set states
     # Run iterations with epochs
     println("Training in progress...")
-    batch_size = 100 # <<<<<<<<<<<<<<<<<<<<<<<<<< BATCH SIZE HERE
+    batch_size = 120 # <<<<<<<<<<<<<<<<<<<<<<<<<< BATCH SIZE HERE
     loss_val = 1 
     cl_loss = 1 # create local loss values to update in for loop
     cd_loss = 1 #                                              '
@@ -156,7 +155,7 @@ function train()
         new_lr = 1 # Just do define in the function
         for (x_batch, y_batch) in loader
             global_step_counter += 1
-            current_lr = Float32(min(3*test_loss_val^(2),0.002f0,lowest_lr))
+            current_lr = Float32(min(1*test_loss_val^2,start_lr,lowest_lr)) # Define changing learning rate
             if current_lr < lowest_lr
                 lowest_lr = current_lr
             end
@@ -191,9 +190,16 @@ function train()
         if epoch == epochs
             final_cl_error, final_cd_error, _ = abs_loss(model, ps, st_loop, test_vars, test_vlm) # Save final absolute errors for cl and cd
         end
-        if epoch % 20 == 0
+        if epoch % 2 == 0
             println("\nEpoch $epoch/$epochs current test loss: $test_loss_val") # Print test loss every 100 epochs
             println("Current lr: $new_lr")
+        end
+        if epoch % 10 == 0
+            loss_plt = plot(1:epoch,train_losses[1:epoch],label="Training Set Loss",title="Loss over time",y_scale=:log10)
+            plot!(1:epoch,test_losses[1:epoch],label="Testing Set Loss")
+            plot!(1:epoch,cl_losses[1:epoch],label="Lift Loss")
+            plot!(1:epoch,cd_losses[1:epoch],label="Drag Loss")
+            savefig(loss_plt, "vlm_neural_net/vlm_Loss_Function.png")
         end
     end
     st = st_loop
@@ -240,14 +246,22 @@ function train()
 
     #endregion
 
-    return model, ps, st, final_cl_error, final_cd_error
+    return model_vars, ps, st, final_cl_error, final_cd_error, vlm_norm
 end
 
 function main()
-    model, ps, st, cl_error, cd_error = train() # run train function to train the neural network
+    inputs = 23 # These are our inputs including alpha, chord, and twist distributions
+    outputs = 40 # <<<<<<<<<<<<<<<<<<< MUST EDIT IF N_OUTPUTS CHANGES  This is four times the spanwise spacing used to set up the VLM analysis
+    model_vars, ps, st, cl_error, cd_error, vlm_norm = @time train(inputs, outputs) # run train function to train the neural network
     println("Test Set CL Average Absolute Error: $cl_error")
     println("Test Set CD Average Absolute Error: $cd_error")
+    println("Would you like to save the model? (Y/N)")
+    answer = readline()
+    if answer == "Y" || answer == "y"
+        println("What name would you like to save the model as?")
+        name = readline()
+        println("Saving model to 'vlm_neural_net/models/$name.jld2'...")
+        save("vlm_neural_net/models/$name.jld2", Dict("ps" => ps, "st" => st, "vlm_norm" => vlm_norm, "model_vars" => model_vars))
+    end
 end
-
-@time main()
 
