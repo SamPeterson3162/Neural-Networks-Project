@@ -1,6 +1,9 @@
 using VortexLattice # load package we will be using
 using DelimitedFiles
 using Random
+using Plots
+using Lux
+using JLD2
 
 # This file writes our vlm_data file that will be used to train the neural network
 
@@ -22,7 +25,7 @@ function analyze_system(a, c_vec, t_vec)
     phi = zeros(span_points) # section rotation about the x-axis
     fc = fill((xc) -> 0, span_points) # camberline function for each section (y/c = f(x/c))
     # define the number of panels in the spanswise and chordwise directions
-    ns = 20 # number of spanwise panels
+    ns = 10 # number of spanwise panels
     nc = 6  # number of chordwise panels
     spacing_s = Uniform() # spanwise discretization scheme
     spacing_c = Uniform() # chordwise discretization scheme
@@ -61,14 +64,85 @@ function analyze_system(a, c_vec, t_vec)
     return cf, c_norm
 end
 
+# 1. RE-DEFINE THE MODEL ARCHITECTURE
+# This must match your training file exactly.
+# Ideally, put this in a shared file like "VLMModel.jl" and include() it in both,
+# but for now, just copy-paste the definition.
+function build_vlm_model(model_vars)
+    inputs, outputs, ml = model_vars
+    return Lux.Chain(
+        Lux.Dense(inputs => ml, relu),
+        Lux.Dense(ml => ml, relu),
+        Lux.Dense(ml => ml, relu),
+        Lux.Dense(ml => ml, relu),
+        Lux.Dense(ml => ml, relu),
+        Lux.Dense(ml => outputs) 
+    )
+end
+
+# 2. LOAD THE SAVED DATA
+println("Loading model weights...")
+data = load("vlm_neural_net/models/10_panels_v2.0.jld2") # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< MODEL 
+ps_loaded = data["ps"]
+st_loaded = data["st"]
+vlm_norm = data["vlm_norm"] # Don't forget this!
+model_vars = data["model_vars"]
+inputs, outputs, ml = model_vars
+
+
+# 3. SETUP THE MODEL
+model = build_vlm_model(model_vars)
+# We don't need to initialize random weights because we are loading trained ones
+# but Lux requires a placeholder setup call to get the structure ready if needed.
+# However, since we have ps_loaded and st_loaded, we can often skip 'Lux.setup' 
+# if we are sure the structure is identical.
+# To be safe, let's just use the model structure we defined.
+
+# 4. DEFINE A PREDICTION FUNCTION
+function predict_cl_cd(inputs::Vector{Float32})
+    # inputs should be length 11: [Alpha, Root, x1, ..., x4, t0, ..., t4]
+    
+    # A. Normalize Inputs using the loaded vlm_norm
+    # Note: vlm_norm rows align with your variables. 
+    # Based on your get_data code, inputs are at indices (num_outputs+1) to end.
+    # Let's assume inputs correspond to indices 49 to 59 (since outputs=48).
+    
+    num_outputs = outputs
+    inputs_norm = zeros(Float32, length(inputs))
+    
+    for i in 1:length(inputs)
+        # map input index 1 -> vlm_norm index 49
+        norm_index = i + num_outputs 
+        mean_val = vlm_norm[norm_index, 1]
+        std_val = vlm_norm[norm_index, 2]
+        inputs_norm[i] = (inputs[i] - mean_val) / std_val
+    end
+
+    # B. Run the Model
+    # Lux returns (prediction, state). We only care about prediction here.
+    preds_norm, _ = Lux.apply(model, inputs_norm, ps_loaded, st_loaded)
+
+    # C. De-normalize Outputs
+    # The model outputs normalized values. We need to scale them back up.
+    preds_real = zeros(Float32, length(preds_norm))
+    pred_length = length(preds_norm)
+    for i in 1:pred_length
+        mean_val = vlm_norm[i, 1] # Outputs are the first 48 rows
+        std_val = vlm_norm[i, 2]
+        preds_real[i] = (preds_norm[i] * std_val) + mean_val
+    end
+
+    return preds_real
+end
+
 function main()
-    n = 10000
+    n = 1
     # Define function to get chords
-    span_points = 20
-    n_edges = 80 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<< This will be four times spanwise panels used for VLM 
-    input_lst = zeros(span_points *2 + 1,n)
-    c_mat = zeros(span_points, n)
-    t_mat = zeros(span_points, n)
+    span_points = 11
+    n_edges = 40 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<< This will be four times spanwise panels used for VLM, which is 1 less than span_points
+    input_lst = zeros(Float32,span_points *2 + 1,n)
+    c_mat = zeros(Float32,span_points, n)
+    t_mat = zeros(Float32,span_points, n)
     for i in 1:n
         x0 = 1
         c_mat[1,i] = x0
@@ -89,27 +163,32 @@ function main()
     end
     input_lst[2:span_points+1,:] = c_mat[:,:]
     input_lst[span_points+2:end,:] = t_mat[:,:]
-    data_lst = zeros(1+2*span_points+n_edges, n)
-    for i in 1:n
-        a = input_lst[1,i]
-        cf, root = analyze_system(a, c_mat[:,i], t_mat[:,i])
-        cf_x = cf[1][1:3:end]# extract coordinate coefficients
-        cf_y = cf[1][2:3:end]# extract coordinate coefficients
-        cf_z = cf[1][3:3:end]# extract coordinate coefficients
-        data_lst[1:Int64(n_edges/2),i] = cf_z[:]
-        data_lst[Int64(n_edges/2+1):n_edges, i] = cf_x[:]
-        data_lst[n_edges + 1,i] = a
-        data_lst[n_edges + 2:end-span_points,i] .= input_lst[2:span_points+1,i] .* root
-        data_lst[end-span_points+1:end,i] .= input_lst[span_points+2:end,i]
-        if i % round(n/100) == 0
-            cent = round(i*100/n;digits=2)
-            println("$cent% written")
-        end
-    end
+    data_lst = zeros(n_edges, 2)
+    a = input_lst[1,1]
+    println("VLM run time:")
+    cf,root = @time analyze_system(a, c_mat[:,1], t_mat[:,1])
+    cf_x = cf[1][1:3:end]# extract coordinate coefficients
+    cf_y = cf[1][2:3:end]# extract coordinate coefficients
+    cf_z = cf[1][3:3:end]# extract coordinate coefficients
+    input_lst[2:12] = input_lst[2:12] * root
+    println("NN run time:")
+    outputs = @time predict_cl_cd(input_lst[:,1])
+    data_lst[1:Int64(n_edges/2),1] = cf_z[:]
+    data_lst[Int64(n_edges/2+1):n_edges, 1] = cf_x[:]
+    data_lst[1:end,2] = outputs[:]
     # Write to file
-    output_file = "vlm_neural_net/vlm_data_file.data"
+    plt = plot(range(-1, 1, length = Int64(n_edges/2)),data_lst[Int64(n_edges/2+1):end,1],label="VLM",title="drag")
+    plot!(range(-1, 1, length = Int64(n_edges/2)),data_lst[Int64(n_edges/2+1):end,2],label="NN")
+    output_file = "vlm_neural_net/vlm_model_test.data"
+    display(plt)
+    plt = plot(range(-1, 1, length = Int64(n_edges/2)),data_lst[1:Int64(n_edges/2),1],label="VLM",title="lift")
+    plot!(range(-1, 1, length = Int64(n_edges/2)),data_lst[1:Int64(n_edges/2),2],label="NN")
+    display(plt)
+    
     delimiter = ' ' 
     writedlm(output_file, transpose(data_lst), delimiter)
 
     println("File '$output_file' written successfully.")
 end
+
+main()

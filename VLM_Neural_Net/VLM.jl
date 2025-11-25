@@ -22,7 +22,7 @@ function analyze_system(a, c_vec, t_vec)
     phi = zeros(span_points) # section rotation about the x-axis
     fc = fill((xc) -> 0, span_points) # camberline function for each section (y/c = f(x/c))
     # define the number of panels in the spanswise and chordwise directions
-    ns = 20 # number of spanwise panels
+    ns = 10 # number of spanwise panels
     nc = 6  # number of chordwise panels
     spacing_s = Uniform() # spanwise discretization scheme
     spacing_c = Uniform() # chordwise discretization scheme
@@ -62,28 +62,28 @@ function analyze_system(a, c_vec, t_vec)
 end
 
 function main()
-    n = 10000
+    n = 5000
     # Define function to get chords
-    span_points = 20
-    n_edges = 80 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<< This will be four times spanwise panels used for VLM 
-    input_lst = zeros(span_points *2 + 1,n)
-    c_mat = zeros(span_points, n)
-    t_mat = zeros(span_points, n)
+    span_points = 11
+    n_edges = 40 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<< This will be four times spanwise panels used for VLM, which is 1 less than span_points
+    input_lst = zeros(Float32,span_points *2 + 1,n)
+    c_mat = zeros(Float32,span_points, n)
+    t_mat = zeros(Float32,span_points, n)
     for i in 1:n
         x0 = 1
         c_mat[1,i] = x0
         c_max = 100
         for j in 2:span_points
             c_cent = round(Int64,(j-1)/(span_points-1)*100) # point along the chord as percentage of chord from root. 0-100
-            x_j = x0 * rand(max(1,100-c_cent):c_max)
-            c_mat[j,i] = x_j
+            x_j = Float32(x0 * rand(max(1,100-c_cent):c_max))
+            c_mat[j,i] = x_j/100
             c_max = x_j
         end
-        input_lst[1,i] = rand(1:100)/10
+        input_lst[1,i] = Float32(rand(1:100)/10)
     end
     for i in 1:n
         for j in 1:span_points
-            t_j = rand(-100:100)/50
+            t_j = Float32(rand(-100:100)/50)
             t_mat[j,i] = t_j
         end
     end
@@ -101,6 +101,7 @@ function main()
         data_lst[n_edges + 1,i] = a
         data_lst[n_edges + 2:end-span_points,i] .= input_lst[2:span_points+1,i] .* root
         data_lst[end-span_points+1:end,i] .= input_lst[span_points+2:end,i]
+        data_lst = Float32.(data_lst)
         if i % round(n/100) == 0
             cent = round(i*100/n;digits=2)
             println("$cent% written")

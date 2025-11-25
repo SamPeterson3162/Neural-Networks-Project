@@ -93,6 +93,8 @@ function train(inputs, outputs)
     #region Loss Functions
     # Define loss function using Mean Squared
     println("Defining loss function")
+    cl_loss_weight = 1
+    cd_loss_weight = 1
     function loss(model, ps, st, x, y) #= Loss function that deals with both CL and CD, returning losses for each as well as the combined
         loss used for optimization in our model=#
         true_y, new_state = model(x, ps, st)
@@ -107,9 +109,9 @@ function train(inputs, outputs)
                     end for c in 1:lst_length]
         l_cl = loss_lst[1:Int64(outputs/2)]
         l_cd = loss_lst[Int64(outputs/2 +1):end]
-        l = sum(loss_lst)/size(true_y, 1) # Gets average loss of all coefficients
-        l_CL = sum(l_cl[:])/size(l_cl,1)
-        l_CD = sum(l_cd[:])/size(l_cd,1)
+        l_CL = sum(l_cl[:])/size(l_cl,1)*cl_loss_weight
+        l_CD = sum(l_cd[:])/size(l_cd,1)*cd_loss_weight
+        l = l_CL + l_CD
         return l, l_CL, l_CD, new_state
     end
     function abs_loss(model, ps, st, x, y)
@@ -155,7 +157,7 @@ function train(inputs, outputs)
         new_lr = 1 # Just do define in the function
         for (x_batch, y_batch) in loader
             global_step_counter += 1
-            current_lr = Float32(min(1*test_loss_val^2,start_lr,lowest_lr)) # Define changing learning rate
+            current_lr = Float32(min(1*test_loss_val/100,start_lr,lowest_lr)) # Define changing learning rate
             if current_lr < lowest_lr
                 lowest_lr = current_lr
             end
@@ -190,11 +192,11 @@ function train(inputs, outputs)
         if epoch == epochs
             final_cl_error, final_cd_error, _ = abs_loss(model, ps, st_loop, test_vars, test_vlm) # Save final absolute errors for cl and cd
         end
-        if epoch % 2 == 0
+        if epoch % 10 == 0
             println("\nEpoch $epoch/$epochs current test loss: $test_loss_val") # Print test loss every 100 epochs
             println("Current lr: $new_lr")
         end
-        if epoch % 10 == 0
+        if epoch % 50 == 0
             loss_plt = plot(1:epoch,train_losses[1:epoch],label="Training Set Loss",title="Loss over time",y_scale=:log10)
             plot!(1:epoch,test_losses[1:epoch],label="Testing Set Loss")
             plot!(1:epoch,cl_losses[1:epoch],label="Lift Loss")
