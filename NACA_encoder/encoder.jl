@@ -8,6 +8,7 @@ using MLUtils
 using LinearAlgebra
 using JLD2
 using DelimitedFiles
+using DataInterpolations
 
 
 function NACA_numbers(n)
@@ -24,32 +25,27 @@ function NACA_numbers(n)
     return nacas
 end
 
-function create_coordinates(code::String, n_points::Int=100)
-    #Parse the 4-digit NACA number
-    m = parse(Int, code[1:1]) / 100.0 #Maximum camber of the airfoil
-    p = parse(Int, code[2:2]) / 10.0 #Position of maximum camber
-    t = parse(Int, code[3:4]) / 100.0 #Maximum thickness as percentage of 
-
-    #Generate x values (cosine spacing for smoother leading edge with more points)
-    beta = range(0, π, length=n_points)
-    x = (1.0 .- cos.(beta)) ./ 2.0  # Points clustered at LE and TE
-
-    #Calculate Thickness (yt)
-    #Coefficients for NACA 4-digit series
-    a0, a1, a2, a3, a4 = 0.2969, -0.1260, -0.3516, 0.2843, -0.1015
+function create_coordinates(code::String, n_points::Int=50)
+    # --- STEP 1: Generate Dense Raw Geometry ---
+    n_dense = 5000 
     
+    m = parse(Int, code[1:1]) / 100.0
+    p = parse(Int, code[2:2]) / 10.0
+    t = parse(Int, code[3:4]) / 100.0
+    
+    beta_dense = range(0, π, length=n_dense)
+    x = (1.0 .- cos.(beta_dense)) ./ 2.0
+    
+    a0, a1, a2, a3, a4 = 0.2969, -0.1260, -0.3516, 0.2843, -0.1015
     yt = @. 5 * t * (a0 * sqrt(x) + a1 * x + a2 * x^2 + a3 * x^3 + a4 * x^4)
-
-    #Calculate Camber (yc) and Gradient (dy/dx)
-    yc = zeros(n_points)
-    dy_dx = zeros(n_points)
-
-    if m == 0  # Symmetric airfoil (e.g., 0012)
-        # Camber is 0, Gradient is 0
-        fill!(yc, 0.0)
-        fill!(dy_dx, 0.0)
+    
+    yc = zeros(n_dense)
+    dy_dx = zeros(n_dense)
+    
+    if m == 0
+        fill!(yc, 0.0); fill!(dy_dx, 0.0)
     else
-        for i in 1:n_points
+        for i in 1:n_dense
             if x[i] < p
                 yc[i] = (m / p^2) * (2 * p * x[i] - x[i]^2)
                 dy_dx[i] = (2 * m / p^2) * (p - x[i])
@@ -59,26 +55,95 @@ function create_coordinates(code::String, n_points::Int=100)
             end
         end
     end
-
-    #Calculate Slope Angle (theta)
+    
     theta = atan.(dy_dx)
-
-    #Calculate Upper and Lower Surface Coordinates
-    # (Trailing Edge -> Leading Edge -> Trailing Edge)
-    xu = @. x - yt * sin(theta)
-    yu = @. yc + yt * cos(theta)
     
-    xl = @. x + yt * sin(theta)
-    yl = @. yc - yt * cos(theta)
-
-    # Combine into a single list of (x, y) coordinates
-    # Upper surface (TE to LE) -> Lower surface (LE to TE)
-    # We drop the first point of lower to avoid duplicate LE point
+    # Raw coordinates
+    xu_raw = @. x - yt * sin(theta)
+    yu_raw = @. yc + yt * cos(theta)
+    xl_raw = @. x + yt * sin(theta)
+    yl_raw = @. yc - yt * cos(theta)
     
-    final_x = vcat(reverse(xu), xl[2:end])
-    final_y = vcat(reverse(yu), yl[2:end])
+    # Combine into one chain for Rotation Processing
+    x_chain = vcat(reverse(xl_raw), xu_raw)
+    y_chain = vcat(reverse(yl_raw), yu_raw)
 
-    return final_x, final_y
+    # --- STEP 2: GEOMETRIC ALIGNMENT (The Fix) ---
+    # We apply the EXACT same rotation logic here as we do in the File Importer.
+    
+    # A. Find Nose and Tail
+    min_x, nose_idx = findmin(x_chain)
+    x_nose, y_nose = x_chain[nose_idx], y_chain[nose_idx]
+    
+    # Tail is average of start/end
+    x_tail = (x_chain[1] + x_chain[end]) / 2.0
+    y_tail = (y_chain[1] + y_chain[end]) / 2.0
+    
+    # B. Calculate Rotation Angle (Chord Line)
+    dx = x_tail - x_nose
+    dy = y_tail - y_nose
+    angle = atan(dy, dx)
+    c, s = cos(-angle), sin(-angle)
+    
+    # C. Rotate and Shift
+    x_rot = zeros(length(x_chain))
+    y_rot = zeros(length(y_chain))
+    
+    for i in 1:length(x_chain)
+        xt = x_chain[i] - x_nose
+        yt = y_chain[i] - y_nose
+        x_rot[i] = xt * c - yt * s
+        y_rot[i] = xt * s + yt * c
+    end
+
+    # D. Normalize
+    chord_len = maximum(x_rot)
+    x_norm = x_rot ./ chord_len
+    y_norm = y_rot ./ chord_len
+    
+    # --- STEP 3: Split Surfaces ---
+    # Re-find the nose in the new rotated system (it will be at index 'nose_idx' or close to it)
+    # But to be safe, we re-scan for min_x
+    _, new_nose_idx = findmin(x_norm)
+    
+    # Lower: Nose -> Tail (0 -> 1)
+    # Since x_chain was (TailLower -> Nose -> TailUpper), 
+    # The first half is Lower (Tail->Nose). We need Nose->Tail.
+    x_lower_dense = x_norm[new_nose_idx:-1:1]
+    y_lower_dense = y_norm[new_nose_idx:-1:1]
+    
+    # Upper: Nose -> Tail (0 -> 1)
+    x_upper_dense = x_norm[new_nose_idx:end]
+    y_upper_dense = y_norm[new_nose_idx:end]
+
+    # --- STEP 4: High-Res Linear Resampling ---
+    # Matches the exact density logic of the importer
+    
+    beta_target = range(0, π, length=n_points)
+    x_target = (1.0 .- cos.(beta_target)) ./ 2.0
+    
+    function dense_interp(x_t, x_src, y_src)
+        if x_t <= 0.0; return y_src[1]; end
+        if x_t >= 1.0; return y_src[end]; end
+        i = searchsortedlast(x_src, x_t)
+        if i == 0; return y_src[1]; end
+        if i >= length(x_src); return y_src[end]; end
+        x1, x2 = x_src[i], x_src[i+1]
+        y1, y2 = y_src[i], y_src[i+1]
+        ratio = (x_t - x1) / (x2 - x1)
+        return y1 + ratio * (y2 - y1)
+    end
+    
+    y_target_upper = [dense_interp(xt, x_upper_dense, y_upper_dense) for xt in x_target]
+    y_target_lower = [dense_interp(xt, x_lower_dense, y_lower_dense) for xt in x_target]
+
+    # --- STEP 5: Format Output ---
+    final_xu = reverse(x_target)
+    final_yu = reverse(y_target_upper)
+    final_xl = x_target[2:end]
+    final_yl = y_target_lower[2:end]
+    
+    return vcat(final_xu, final_xl), vcat(final_yu, final_yl)
 end
 
 function get_naca_data(nacas, n_coords)
@@ -108,7 +173,7 @@ function plt()
     plot(x_coords, y_coords, aspect_ratio=:equal, title=nacas[1], label = "")
 end
 
-function train_neural_network(n_naca,n_coords,n_digits,naca_data)
+function train_neural_network(n_naca,n_coords,n_digits,naca_data, epochs)
     n_inputs = n_coords*4-2
     #region Preprocessing
     println("Normalizing Airfoil Data...")
@@ -131,20 +196,21 @@ function train_neural_network(n_naca,n_coords,n_digits,naca_data)
     #endregion
     #region Model Definition
     # Generate a Model using two parts: An encoder and a decoder, with n_digits in the middle
-    central_neurons = 100
+    central_neurons = 80
     model_vars = (n_inputs, central_neurons, n_digits)
     encoder = Lux.Chain(
         Lux.Dense(n_inputs => central_neurons, relu),
+        Lux.Dense(central_neurons => central_neurons, relu),
         Lux.Dense(central_neurons => n_digits)
     )
     decoder = Lux.Chain(
         Lux.Dense(n_digits => central_neurons, relu),
+        Lux.Dense(central_neurons => central_neurons, relu),
         Lux.Dense(central_neurons => n_inputs)
     )
     model = Lux.Chain(encoder = encoder, decoder = decoder) 
     rng = Random.default_rng()
     ps, st = Lux.setup(rng, model)
-    epochs = 5000 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< DEFINE EPOCHS HERE
     train_losses = ones(epochs) # Create local lists for training and testing losses
     test_losses = ones(epochs)
     x_losses = ones(epochs)
@@ -165,7 +231,7 @@ function train_neural_network(n_naca,n_coords,n_digits,naca_data)
         l_y = loss_lst[Int64(n_inputs/2 +1):end]
         l_X = sum(l_x[:])/size(l_x,1)
         l_Y = sum(l_y[:])/size(l_y,1)
-        total_loss = (l_X+l_Y)/2
+        total_loss = (.1*l_X+l_Y)/2
         return total_loss, l_X, l_Y, new_state
     end
     function absolute_loss(model, ps, st, x, y) #Loss function that compares unnormalized data to outputs of autoencoder
@@ -190,7 +256,7 @@ function train_neural_network(n_naca,n_coords,n_digits,naca_data)
     opt_state = Optimisers.setup(optimizer, ps) # Set states
     # Run iterations with epochs
     println("Training in progress...")
-    batch_size = 64 # <<<<<<<<<<<<<<<<<<<<<<<<<< BATCH SIZE HERE
+    batch_size = 100 # <<<<<<<<<<<<<<<<<<<<<<<<<< BATCH SIZE HERE
     loss_val = 1 
     x_loss = 1 # create local loss values to update in for loop
     y_loss = 1 #                                              '
@@ -266,6 +332,140 @@ function train_neural_network(n_naca,n_coords,n_digits,naca_data)
     return model, ps, st, stats_matrix
 end
 
+function process_general_airfoil(filename::String, n_points::Int=50)
+    # --- 1. Read Sparse File ---
+    x_raw, y_raw = Float64[], Float64[]
+    for line in eachline(filename)
+        parts = split(strip(line))
+        if length(parts) >= 2
+            try push!(x_raw, parse(Float64, parts[1])); push!(y_raw, parse(Float64, parts[2])) catch end
+        end
+    end
+    if isempty(x_raw); error("Empty file: $filename"); end
+
+    # --- 2. GEOMETRIC ALIGNMENT (De-Rotation) ---
+    # A. Find Nose and Tail
+    min_val, nose_idx = findmin(x_raw)
+    x_nose, y_nose = x_raw[nose_idx], y_raw[nose_idx]
+    
+    # Tail = Average of first and last points
+    x_tail = (x_raw[1] + x_raw[end]) / 2.0
+    y_tail = (y_raw[1] + y_raw[end]) / 2.0
+    
+    # B. Calculate Rotation Angle
+    dx = x_tail - x_nose
+    dy = y_tail - y_nose
+    angle = atan(dy, dx)
+    c, s = cos(-angle), sin(-angle)
+    
+    # C. Rotate
+    x_rot = zeros(length(x_raw))
+    y_rot = zeros(length(y_raw))
+    
+    for i in 1:length(x_raw)
+        xt = x_raw[i] - x_nose
+        yt = y_raw[i] - y_nose
+        x_rot[i] = xt * c - yt * s
+        y_rot[i] = xt * s + yt * c
+    end
+    
+    # D. Normalize
+    chord_len = maximum(x_rot)
+    x_norm = x_rot ./ chord_len
+    y_norm = y_rot ./ chord_len
+
+    # --- 3. SEPARATE SURFACES ---
+    # Re-find nose in normalized coordinates
+    _, new_nose_idx = findmin(x_norm)
+    
+    limb_a_x = x_norm[1:new_nose_idx]
+    limb_a_y = y_norm[1:new_nose_idx]
+    limb_b_x = x_norm[new_nose_idx:end]
+    limb_b_y = y_norm[new_nose_idx:end]
+    
+    if mean(limb_a_y) > mean(limb_b_y)
+        upper_x, upper_y = limb_a_x, limb_a_y
+        lower_x, lower_y = limb_b_x, limb_b_y
+    else
+        upper_x, upper_y = limb_b_x, limb_b_y
+        lower_x, lower_y = limb_a_x, limb_a_y
+    end
+
+    # --- 4. SQRT TRANSFORM & ANCHORING ---
+    u_upper = sqrt.(clamp.(upper_x, 0.0, 1.0))
+    u_lower = sqrt.(clamp.(lower_x, 0.0, 1.0))
+    
+    # Sort
+    perm_u = sortperm(u_upper); u_upper = u_upper[perm_u]; y_upper = upper_y[perm_u]
+    perm_l = sortperm(u_lower); u_lower = u_lower[perm_l]; y_lower = lower_y[perm_l]
+
+    # Force Anchors (Prevents Spline Extrapolation Errors)
+    function ensure_boundary!(u_vec, y_vec, target_u)
+        tol = 1e-6
+        if abs(u_vec[1] - target_u) > tol && target_u == 0.0
+             pushfirst!(u_vec, 0.0); pushfirst!(y_vec, 0.0)
+        end
+        if abs(u_vec[end] - target_u) > tol && target_u == 1.0
+             push!(u_vec, 1.0); push!(y_vec, 0.0)
+        end
+    end
+    
+    ensure_boundary!(u_upper, y_upper, 0.0); ensure_boundary!(u_upper, y_upper, 1.0)
+    ensure_boundary!(u_lower, y_lower, 0.0); ensure_boundary!(u_lower, y_lower, 1.0)
+
+    # Clean Duplicates
+    unique_u = unique(i -> u_upper[i], 1:length(u_upper))
+    u_upper = u_upper[unique_u]; y_upper = y_upper[unique_u]
+    unique_l = unique(i -> u_lower[i], 1:length(u_lower))
+    u_lower = u_lower[unique_l]; y_lower = y_lower[unique_l]
+
+    # --- 5. INITIAL SPLINE (Dense Proxy) ---
+    itp_u = AkimaInterpolation(y_upper, u_upper)
+    itp_l = AkimaInterpolation(y_lower, u_lower)
+    
+    # Generate Dense Cloud
+    n_dense = 2000
+    beta_dense = range(0, π, length=n_dense)
+    x_dense_t = (1.0 .- cos.(beta_dense)) ./ 2.0
+    u_dense_t = sqrt.(x_dense_t) # 0.0 -> 1.0
+    
+    y_dense_u = itp_u.(u_dense_t)
+    y_dense_l = itp_l.(u_dense_t)
+
+    # --- 6. HIGH-RES LINEAR RESAMPLING (FIXED) ---
+    # We pass x_dense_t directly (0 -> 1) because searchsortedlast requires ascending order.
+    
+    x_upper_dense = x_dense_t # Already 0->1
+    y_upper_dense = y_dense_u # Nose->Tail
+    
+    x_lower_dense = x_dense_t # Already 0->1
+    y_lower_dense = y_dense_l # Nose->Tail
+
+    # Target Grid (Cosine)
+    beta_target = range(0, π, length=n_points)
+    x_target = (1.0 .- cos.(beta_target)) ./ 2.0
+    
+    function dense_interp(x_t, x_src, y_src)
+        i = searchsortedlast(x_src, x_t)
+        if i == 0; return y_src[1]; end
+        if i >= length(x_src); return y_src[end]; end
+        x1, x2 = x_src[i], x_src[i+1]
+        y1, y2 = y_src[i], y_src[i+1]
+        return y1 + ((x_t - x1) / (x2 - x1)) * (y2 - y1)
+    end
+    
+    y_target_upper = [dense_interp(xt, x_upper_dense, y_upper_dense) for xt in x_target]
+    y_target_lower = [dense_interp(xt, x_lower_dense, y_lower_dense) for xt in x_target]
+
+    # --- 7. FORMAT OUTPUT ---
+    final_xu = reverse(x_target)
+    final_yu = reverse(y_target_upper)
+    final_xl = x_target[2:end]
+    final_yl = y_target_lower[2:end]
+    
+    return vcat(vcat(final_xu, final_xl), vcat(final_yu, final_yl))
+end
+
 function visualize_code(model, ps, st, nacas, n_naca, n_coords, naca_data, stats_matrix)
     n_inputs = n_coords*4-2
     println("Normalizing Visualization Data...")
@@ -306,10 +506,16 @@ function visualize_code(model, ps, st, nacas, n_naca, n_coords, naca_data, stats
                  title="Colored by Thickness (T)", label="", 
                  xlabel="Lat 1", ylabel="Lat 2", zlabel="Lat 3",
                  camera=(30, 30), markerstrokewidth=0, markersize=3, alpha=0.8)
-    # Display them all together
+    p4 = scatter(m_lst, p_lst, t_lst, xlabel="Max Camber", 
+                 ylabel="Camber Position", zlabel="Thickness", title="Original Naca Values",label="")
+    p5 = scatter(lx,ly,lz, xlabel="Max Camber", 
+                 ylabel="Camber Position", zlabel="Thickness", title="Encoded Values", label = "")
+    # Save them all together
     savefig(p1, "NACA_encoder/figures/plotted_max_camber_correlation.png")
     savefig(p2, "NACA_encoder/figures/plotted_camber_positon_correlation.png")
     savefig(p3, "NACA_encoder/figures/plotted_thickness_correlation.png")
+    savefig(p4, "NACA_encoder/figures/plotted_original_NACA_values.png")
+    savefig(p5, "NACA_encoder/figures/plotted_encoded_values.png")
     # This prints how much each neuron cares about M, P, or T
     println("\n--- Correlation Analysis ---")
     println("Rows = Latent Neurons (1, 2, 3)")
@@ -346,10 +552,12 @@ function build_model(model_vars)
     n_inputs, central_neurons, n_digits = model_vars
     encoder = Lux.Chain(
         Lux.Dense(n_inputs => central_neurons, relu),
+        Lux.Dense(central_neurons => central_neurons, relu),
         Lux.Dense(central_neurons => n_digits)
     )
     decoder = Lux.Chain(
         Lux.Dense(n_digits => central_neurons, relu),
+        Lux.Dense(central_neurons => central_neurons, relu),
         Lux.Dense(central_neurons => n_inputs)
     )
     return Lux.Chain(encoder = encoder, decoder = decoder)
@@ -364,11 +572,13 @@ function load_neural_network(filename)
     return build_model(model_vars), ps_loaded, st_loaded, stats_matrix
 end
 
+current_model = "V7"
+
 function foil()
     n_coords = 25 # Run the same as the trained model
     nacas = NACA_numbers(5)
     naca_data = get_naca_data(nacas,n_coords)
-    model, ps, st, stats_matrix = load_neural_network("NACA_encoder/models/5000_epochs.jld2")
+    model, ps, st, stats_matrix = load_neural_network("NACA_encoder/models/$current_model.jld2")
     naca_data2 = predict_naca_data(naca_data, model, ps, st, stats_matrix, n_coords)
     points = n_coords*2-1
     for i in 1:5
@@ -376,22 +586,53 @@ function foil()
         naca_data_y = naca_data[points+1:end, i]
         naca_data2_x = naca_data2[1:points, i]
         naca_data2_y = naca_data2[points+1:end, i]
+        if i == 1
+            data_lst = zeros(2, points)
+            data_lst[1,1:points]=naca_data_x
+            data_lst[2,1:points]=naca_data_y
+            writedlm("NACA_encoder/airfoil_data/random_NACA.data", transpose(data_lst), "  ")
+        end
         plt = plot(naca_data_x, naca_data_y, title="Airfoil Comparison", label="Actual", aspect_ratio=:equal)
         plot!(naca_data2_x, naca_data2_y,label="Decoded")
         savefig(plt, "NACA_encoder/figures/airfoil_sample_$i.png")
     end
 end
 
+function new_foils()
+    n_coords = 25 # Run the same as the trained model
+    airfoil_lst = ["S2062", "S4022","NACA2412","NACA4424", "random_NACA", "lrn1007", "SD7062", "USA33"]
+    airfoils = size(airfoil_lst,1)
+    naca_data = zeros((n_coords*4-2),airfoils)
+    for i in 1:airfoils
+        data = process_general_airfoil("NACA_encoder/airfoil_data/$(airfoil_lst[i]).data", 25)
+        naca_data[:,i] = data
+    end
+    model, ps, st, stats_matrix = load_neural_network("NACA_encoder/models/$current_model.jld2")
+    naca_data2 = predict_naca_data(naca_data, model, ps, st, stats_matrix, n_coords)
+    points = n_coords*2-1
+    for i in 1:airfoils
+        naca_data_x = naca_data[1:points, i]
+        naca_data_y = naca_data[points+1:end, i]
+        naca_data2_x = naca_data2[1:points, i]
+        naca_data2_y = naca_data2[points+1:end, i]
+        plt = plot(naca_data_x, naca_data_y, title="Airfoil Comparison", label="Actual", aspect_ratio=:equal)
+        plot!(naca_data2_x, naca_data2_y,label="Decoded")
+        savefig(plt, "NACA_encoder/figures/airfoil_sample_$(airfoil_lst[i]).png")
+    end
+end
+
 function main(command::String="")
-    n_naca = 2000 # How many different NACA foils we will train with
+    n_naca = 5000 # How many different NACA foils we will train with
     n_coords = 25
     n_digits = 3 # Digits we would like to encode down to
     nacas = NACA_numbers(n_naca) # Gives n different random NACA airfoils
     naca_data = get_naca_data(nacas,n_coords)
     if command == "train"
-        model, ps, st, stats_matrix = train_neural_network(n_naca, n_coords, n_digits, naca_data)
+        epochs = 500
+        model, ps, st, stats_matrix = train_neural_network(n_naca, n_coords, n_digits, naca_data, epochs)
     else
-        model, ps, st, stats_matrix = load_neural_network("NACA_encoder/models/5000_epochs.jld2")
+        model, ps, st, stats_matrix = load_neural_network("NACA_encoder/models/$current_model.jld2")
     end
     visualize_code(model, ps, st, nacas, n_naca, n_coords, naca_data, stats_matrix)
 end
+
