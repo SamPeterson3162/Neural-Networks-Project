@@ -16,10 +16,11 @@ function NACA_numbers(n)
     nacas = fill("", n)
     for i in 1:n
         #Create random numbers that are realistic for NACA
-        m = rand(0:9)
-        p = rand(0:9)
-        t = rand(5:30)
-        code = "$(m)$(p)$(string(t, pad=2))"
+        l = rand(1:8)
+        p = rand(1:5)
+        q = rand(0:1)
+        t = rand(5:40)
+        code = "$(l)$(p)$(q)$(string(t, pad=2))"
         nacas[i] = code
     end
     return nacas
@@ -28,26 +29,71 @@ end
 
 function create_coordinates(code::String, n_points::Int=50)
     # Generate Dense Raw Geometry ---
-    n_dense = 5000 
-    m = parse(Int, code[1:1]) / 100.0
-    p = parse(Int, code[2:2]) / 10.0
-    t = parse(Int, code[3:4]) / 100.0
+    n_dense = n_points
+    l = parse(Int, code[1:1])*.15
+    p = parse(Int, code[2:2]) / 20.0
+    q = parse(Int, code[3:3])
+    t = parse(Int, code[4:5]) / 100.0
     beta_dense = range(0, π, length=n_dense)
     x = (1.0 .- cos.(beta_dense)) ./ 2.0
     a0, a1, a2, a3, a4 = 0.2969, -0.1260, -0.3516, 0.2843, -0.1015
     yt = @. 5 * t * (a0 * sqrt(x) + a1 * x + a2 * x^2 + a3 * x^3 + a4 * x^4)
     yc = zeros(n_dense)
     dy_dx = zeros(n_dense)
+    function get_m_p(l, p, q)
+        # Common Position Inputs
+        positions = [.05, .10, .15, .20, .25]
+        
+        if q == 0 # Standard Camber
+            m_vals = [0.0580, 0.1260, 0.2025, 0.2900, 0.3910]
+            k1_vals = [361.4, 51.64, 15.957, 6.643, 3.230]
+            # Standard line has no k2 or R, so return 0 for R
+            R_vals = [0.0, 0.0, 0.0, 0.0, 0.0] 
+            
+        elseif q == 1 # Reflexed Camber
+            m_vals = [0.1300, 0.2170, 0.3184, 0.4412, 0.5896]
+            k1_vals = [51.99, 15.793, 6.520, 3.191, 1.762]
+            # R = k2/k1 ratio
+            R_vals = [0.0007, 0.0085, 0.0303, 0.0719, 0.1382]
+        end
+
+        # Perform Interpolation
+        inter_m = AkimaInterpolation(m_vals, positions)
+        inter_k1 = AkimaInterpolation(k1_vals, positions)
+        inter_R = AkimaInterpolation(R_vals, positions)
+
+        # Calculate final values
+        m = inter_m(p)
+        # Scale k1 based on the design lift (l)
+        # Note: The table values are for Cl=0.3
+        k1 = inter_k1(p) * (l / 0.3)
+        R = inter_R(p) # Only relevant if q=1
+
+        return m, k1, R
+    end
+    m, k1, R = get_m_p(l, p, q)
     if m == 0
         fill!(yc, 0.0); fill!(dy_dx, 0.0)
     else
-        for i in 1:n_dense
-            if x[i] < p
-                yc[i] = (m / p^2) * (2 * p * x[i] - x[i]^2)
-                dy_dx[i] = (2 * m / p^2) * (p - x[i])
-            else
-                yc[i] = (m / (1 - p)^2) * ((1 - 2 * p) + 2 * p * x[i] - x[i]^2)
-                dy_dx[i] = (2 * m / (1 - p)^2) * (p - x[i])
+        if q == 0
+            for i in 1:n_dense
+                if x[i] < p
+                    yc[i] = (k1/6)*(x[i]^3-3*m*x[i]^2+(m^2)*(3-m)*x[i])
+                    dy_dx[i] = (k1/6)*(3*x[i]^2-6*m*x[i]+(m^2)*(3-m))
+                else
+                    yc[i] = ((k1*m^3)/6)*(1-x[i])
+                    dy_dx[i] = ((k1*m^3)/6)*(-1)
+                end
+            end
+        else
+            for i in 1:n_dense
+                if x[i] < p
+                    yc[i] = (k1/6)*((x[i]-m)^3-x[i]*R*(1-m)^3-(m^3)*x[i]+m^3)
+                    dy_dx[i] = (k1/6)*(3*(x[i]-m)^2-R*(1-m)^3-m^3)
+                else
+                    yc[i] = (k1/6)*(R*(x[i]-m)^3-x[i]*R*(1-m)^3-(m^3)*x[i]+m^3)
+                    dy_dx[i] = (k1/6)*(3*R*(x[i]-m)^2-R*(1-m)^3-m^3)
+                end
             end
         end
     end
@@ -57,83 +103,12 @@ function create_coordinates(code::String, n_points::Int=50)
     yu_raw = @. yc + yt * cos(theta)
     xl_raw = @. x + yt * sin(theta)
     yl_raw = @. yc - yt * cos(theta)
-    # Combine into one chain
-    x_chain = vcat(reverse(xl_raw), xu_raw)
-    y_chain = vcat(reverse(yl_raw), yu_raw)
 
-    # --- STEP 2: GEOMETRIC ALIGNMENT ---
-    # Find Nose and Tail
-    min_x, nose_idx = findmin(x_chain)
-    x_nose, y_nose = x_chain[nose_idx], y_chain[nose_idx]
-    
-    x_tail = (x_chain[1] + x_chain[end]) / 2.0
-    y_tail = (y_chain[1] + y_chain[end]) / 2.0
-    
-    # De-Rotation
-    dx = x_tail - x_nose
-    dy = y_tail - y_nose
-    angle = atan(dy, dx)
-    c_rot, s_rot = cos(-angle), sin(-angle)
-    
-    x_rot = zeros(length(x_chain))
-    y_rot = zeros(length(y_chain))
-    
-    for i in 1:length(x_chain)
-        xt = x_chain[i] - x_nose
-        yt = y_chain[i] - y_nose
-        x_rot[i] = xt * c_rot - yt * s_rot
-        y_rot[i] = xt * s_rot + yt * c_rot
-    end
-
-    # Normalize
-    chord_len = maximum(x_rot)
-    x_norm = x_rot ./ chord_len
-    y_norm = y_rot ./ chord_len
-    
-    # --- STEP 3: Split Surfaces ---
-    _, new_nose_idx = findmin(x_norm)
-    
-    x_lower_dense = x_norm[new_nose_idx:-1:1]
-    y_lower_dense = y_norm[new_nose_idx:-1:1]
-    
-    x_upper_dense = x_norm[new_nose_idx:end]
-    y_upper_dense = y_norm[new_nose_idx:end]
-
-    # --- STEP 4: High-Res Linear Resampling ---
-    beta_target = range(0, π, length=n_points)
-    x_target = (1.0 .- cos.(beta_target)) ./ 2.0
-    
-    # THE FIX: Hard-coded Zero Return
-    function dense_interp(x_t, x_src, y_src)
-        # 1. HARD ZERO ENFORCEMENT
-        # If we are at the nose (0.0) or tail (1.0), return EXACTLY 0.0.
-        # We use a tiny tolerance to catch float errors like 1e-17
-        if x_t <= 1e-9; return 0.0; end
-        if x_t >= 1.0 - 1e-9; return 0.0; end
-        
-        # 2. Standard Search & Interp
-        i = searchsortedlast(x_src, x_t)
-        
-        if i == 0; return y_src[1]; end
-        if i >= length(x_src); return y_src[end]; end
-        
-        x1, x2 = x_src[i], x_src[i+1]
-        y1, y2 = y_src[i], y_src[i+1]
-        
-        ratio = (x_t - x1) / (x2 - x1)
-        return y1 + ratio * (y2 - y1)
-    end
-    
-    y_target_upper = [dense_interp(xt, x_upper_dense, y_upper_dense) for xt in x_target]
-    y_target_lower = [dense_interp(xt, x_lower_dense, y_lower_dense) for xt in x_target]
-
-    # --- STEP 5: Format Output ---
-    final_xu = reverse(x_target)
-    final_yu = reverse(y_target_upper)
-    final_xl = x_target[2:end]
-    final_yl = y_target_lower[2:end]
-    
-    return vcat(final_xu, final_xl), vcat(final_yu, final_yl)
+    # Upper Surface: TE -> LE (reverse xu)
+    # Lower Surface: LE -> TE (xl)
+    final_x = vcat(reverse(xu_raw), xl_raw[2:end])
+    final_y = vcat(reverse(yu_raw), yl_raw[2:end])
+    return final_x, final_y
 end
 
 function get_naca_data(nacas, n_coords)
@@ -221,7 +196,7 @@ function train_neural_network(n_naca,n_coords,n_digits,naca_data, epochs)
         l_y = loss_lst[Int64(n_inputs/2 +1):end]
         l_X = sum(l_x[:])/size(l_x,1)
         l_Y = sum(l_y[:])/size(l_y,1)
-        total_loss = (.1*l_X+l_Y)/2
+        total_loss = (l_X+l_Y)/2
         return total_loss, l_X, l_Y, new_state
     end
     function absolute_loss(model, ps, st, x, y) #Loss function that compares unnormalized data to outputs of autoencoder
@@ -498,8 +473,8 @@ function visualize_code(model, ps, st, nacas, n_naca, n_coords, naca_data, stats
                  camera=(30, 30), markerstrokewidth=0, markersize=3, alpha=0.8)
     p4 = scatter(m_lst, p_lst, t_lst, xlabel="Max Camber", 
                  ylabel="Camber Position", zlabel="Thickness", title="Original Naca Values",label="")
-    p5 = scatter(lx,ly,lz, xlabel="Latent Neuron 1", 
-                 ylabel="Latent Neuron 2", zlabel="Latent Neuron 3", title="Encoded Values", label = "")
+    p5 = scatter(lx,ly,lz, xlabel="Max Camber", 
+                 ylabel="Camber Position", zlabel="Thickness", title="Encoded Values", label = "")
     # Save them all together
     savefig(p1, "NACA_encoder/figures/plotted_max_camber_correlation.png")
     savefig(p2, "NACA_encoder/figures/plotted_camber_positon_correlation.png")
@@ -560,10 +535,10 @@ function load_neural_network(filename)
     return build_model(model_vars), ps_loaded, st_loaded, stats_matrix
 end
 
-current_model = "V7"
+current_model = "NACA6V3"
+n_coords = 40
 
 function foil()
-    n_coords = 25 # Run the same as the trained model
     nacas = NACA_numbers(5)
     naca_data = get_naca_data(nacas,n_coords)
     model, ps, st, stats_matrix = load_neural_network("NACA_encoder/models/$current_model.jld2")
@@ -587,7 +562,6 @@ function foil()
 end
 
 function new_foils()
-    n_coords = 25# Run the same as the trained model
     airfoil_lst = ["S2062", "S4022","NACA2412","NACA4424", "random_NACA", "lrn1007", "SD7062", "USA33"]
     airfoils = size(airfoil_lst,1)
     naca_data = zeros((n_coords*4-2),airfoils)
@@ -610,13 +584,12 @@ function new_foils()
 end
 
 function main(command::String="")
-    n_naca = 2000 # How many different NACA foils we will train with
-    n_coords = 25
-    n_digits = 3 # Digits we would like to encode down to
+    n_naca = 5000 # How many different NACA foils we will train with
+    n_digits = 4 # Digits we would like to encode down to
     nacas = NACA_numbers(n_naca) # Gives n different random NACA airfoils
     naca_data = get_naca_data(nacas,n_coords)
     if command == "train"
-        epochs = 500
+        epochs = 600
         model, ps, st, stats_matrix = train_neural_network(n_naca, n_coords, n_digits, naca_data, epochs)
     else
         model, ps, st, stats_matrix = load_neural_network("NACA_encoder/models/$current_model.jld2")

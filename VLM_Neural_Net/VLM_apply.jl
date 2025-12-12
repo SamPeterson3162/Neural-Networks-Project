@@ -64,7 +64,6 @@ function analyze_system(a, c_vec, t_vec)
     return cf, c_norm
 end
 
-# 1. RE-DEFINE THE MODEL ARCHITECTURE
 # This must match your training file exactly.
 # Ideally, put this in a shared file like "VLMModel.jl" and include() it in both,
 # but for now, just copy-paste the definition.
@@ -89,8 +88,6 @@ vlm_norm = data["vlm_norm"] # Don't forget this!
 model_vars = data["model_vars"]
 inputs, outputs, ml = model_vars
 
-
-# 3. SETUP THE MODEL
 model = build_vlm_model(model_vars)
 # We don't need to initialize random weights because we are loading trained ones
 # but Lux requires a placeholder setup call to get the structure ready if needed.
@@ -98,11 +95,9 @@ model = build_vlm_model(model_vars)
 # if we are sure the structure is identical.
 # To be safe, let's just use the model structure we defined.
 
-# 4. DEFINE A PREDICTION FUNCTION
 function predict_cl_cd(inputs::Vector{Float32})
     # inputs should be length 11: [Alpha, Root, x1, ..., x4, t0, ..., t4]
     
-    # A. Normalize Inputs using the loaded vlm_norm
     # Note: vlm_norm rows align with your variables. 
     # Based on your get_data code, inputs are at indices (num_outputs+1) to end.
     # Let's assume inputs correspond to indices 49 to 59 (since outputs=48).
@@ -117,12 +112,9 @@ function predict_cl_cd(inputs::Vector{Float32})
         std_val = vlm_norm[norm_index, 2]
         inputs_norm[i] = (inputs[i] - mean_val) / std_val
     end
-
-    # B. Run the Model
     # Lux returns (prediction, state). We only care about prediction here.
     preds_norm, _ = Lux.apply(model, inputs_norm, ps_loaded, st_loaded)
 
-    # C. De-normalize Outputs
     # The model outputs normalized values. We need to scale them back up.
     preds_real = zeros(Float32, length(preds_norm))
     pred_length = length(preds_norm)
